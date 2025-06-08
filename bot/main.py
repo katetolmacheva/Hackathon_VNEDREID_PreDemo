@@ -48,7 +48,7 @@ from .userdb import (
 )
 
 from .plotting import make_portfolio_chart, make_price_history_chart
-from .market import get_ticker_history
+from .market import get_ticker_history, is_valid_moex_ticker
 
 
 
@@ -221,29 +221,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-
         await update.message.reply_text('Использование: /subscribe <TICKER> [...]')
         return
-    tickers = context.args
-    subs = await add_subscriptions(update.effective_user.id, tickers)
-    await update.message.reply_text(
-        'Текущие подписки: ' + ', '.join(subs)
-    )
-    logging.info(
-        "%s subscribed to %s",
-        update.effective_user.id,
-        ','.join([t.upper() for t in tickers]),
-    )
+    
+    invalid_tickers = []
+    valid_tickers = []
+    
+    for ticker in context.args:
+        if is_valid_moex_ticker(ticker):
+            valid_tickers.append(ticker)
+        else:
+            invalid_tickers.append(ticker)
+    
+    if invalid_tickers:
+        await update.message.reply_text(
+            f'Следующие тикеры не найдены на MOEX: {", ".join(invalid_tickers)}'
+        )
+    
+    if valid_tickers:
+        subs = await add_subscriptions(update.effective_user.id, valid_tickers)
+        await update.message.reply_text(
+            'Текущие подписки: ' + ', '.join(subs)
+        )
+        logging.info(
+            "%s subscribed to %s",
+            update.effective_user.id,
+            ','.join([t.upper() for t in valid_tickers]),
+        )
 
 
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-
         await update.message.reply_text('Использование: /unsubscribe <TICKER>')
         return
+    
     ticker = context.args[0]
-    await remove_subscription(update.effective_user.id, ticker)
+    if not is_valid_moex_ticker(ticker):
+        await update.message.reply_text(f'Тикер {ticker.upper()} не найден на MOEX')
+        return
+        
+    await remove_subscription(updateуцъ.effective_user.id, ticker)
     await update.message.reply_text(f'Вы отписались от {ticker.upper()}')
     logging.info("%s unsubscribed from %s", update.effective_user.id, ticker.upper())
 
@@ -258,26 +276,44 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def digest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    tickers = await get_subscriptions(update.effective_user.id)
-    if not tickers:
-
-        await update.message.reply_text('У вас нет подписок.')
-
+    """Send news digest for subscribed tickers."""
+    user_id = update.effective_user.id
+    subs = await get_subscriptions(user_id)
+    if not subs:
+        await update.message.reply_text(
+            'У вас нет подписок. Используйте /subscribe для добавления тикеров.'
+        )
         return
-    await update.message.reply_text('Собираю новости, пожалуйста подождите...')
-    tasks = [asyncio.create_task(get_news_digest(t)) for t in tickers]
 
-    digests = await asyncio.gather(*tasks, return_exceptions=True)
-    results = []
-    for t, d in zip(tickers, digests):
-        if isinstance(d, Exception):
-            msg = 'Ошибка получения новостей'
+    await update.message.reply_text('Собираю новости, пожалуйста подождите...')
+    
+    valid_subs = []
+    invalid_subs = []
+    
+    for ticker in subs:
+        if is_valid_moex_ticker(ticker):
+            valid_subs.append(ticker)
         else:
-            msg = d
-        results.append(f'*{t}*\n{msg}')
-    messages = results
-    await update.message.reply_text('\n\n'.join(messages), parse_mode='Markdown')
-    logging.info("Digest sent to %s for %d tickers", update.effective_user.id, len(tickers))
+            invalid_subs.append(ticker)
+    
+    if invalid_subs:
+        await update.message.reply_text(
+            f'Следующие тикеры не найдены на MOEX и будут удалены из подписок: {", ".join(invalid_subs)}'
+        )
+        for ticker in invalid_subs:
+            await remove_subscription(user_id, ticker)
+    
+    if not valid_subs:
+        await update.message.reply_text('Нет валидных подписок для получения новостей')
+        return
+
+    for ticker in valid_subs:
+        digest = await get_news_digest(ticker)
+        if digest:
+            await update.message.reply_text(
+                f'*{ticker.upper()}*\n{digest}',
+                parse_mode='Markdown'
+            )
 
 
 async def mybag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -343,33 +379,41 @@ async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send price history chart for a ticker."""
     if not context.args:
-        await update.message.reply_text(
-            'Использование: /history <TICKER> [days]'
-        )
+        await update.message.reply_text('Использование: /history <TICKER> [days]')
         return
+
     ticker = context.args[0]
+    if not is_valid_moex_ticker(ticker):
+        await update.message.reply_text(f'Тикер {ticker.upper()} не найден на MOEX')
+        return
+
     days = 30
     if len(context.args) > 1:
         try:
             days = int(context.args[1])
         except ValueError:
-            days = 30
-    user_id = update.effective_user.id
-    token = await load_token(user_id)
+            await update.message.reply_text('Количество дней должно быть числом')
+            return
+
+    token = await load_token(update.effective_user.id)
     if not token:
-        WAITING_TOKEN.add(user_id)
-        await update.message.reply_text('Отправьте токен Тинькофф Инвест в формате t.*')
+        await update.message.reply_text(
+            'Токен Тинькофф не найден. Используйте /token для установки.'
+        )
         return
-    await update.message.reply_text('Получаю данные, пожалуйста подождите...')
-    points = await get_ticker_history(token, ticker, days)
-    buf = make_price_history_chart(points)
-    if not buf:
-        await update.message.reply_text('Не удалось построить график.')
-        return
-    buf.name = f'{ticker}.png'
-    await update.message.reply_photo(buf)
+
+    try:
+        history_data = await get_ticker_history(token, ticker, days)
+        if not history_data:
+            await update.message.reply_text('История не найдена')
+            return
+
+        chart = await asyncio.to_thread(make_price_history_chart, history_data)
+        await update.message.reply_photo(chart)
+    except Exception as e:
+        logging.error('Failed to get history: %s', e)
+        await update.message.reply_text('Ошибка получения истории')
 
 
 async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

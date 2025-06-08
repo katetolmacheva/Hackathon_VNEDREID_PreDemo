@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
+import requests
 
 from tinkoff.invest import Client, CandleInterval
 
@@ -39,3 +40,37 @@ def _fetch_history(token: str, ticker: str, days: int) -> List[Dict]:
 
 async def get_ticker_history(token: str, ticker: str, days: int = 30) -> List[Dict]:
     return await asyncio.to_thread(_fetch_history, token, ticker, days)
+
+
+def is_valid_moex_ticker(ticker: str) -> bool:
+    """
+    Проверяет существование тикера на Московской бирже.
+    
+    Args:
+        ticker (str): Тикер для проверки
+        
+    Returns:
+        bool: True если тикер существует, False в противном случае
+    """
+    ticker = ticker.upper()
+    end = datetime.today()
+    start = end - timedelta(days=1)
+
+    url = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json"
+    params = {
+        "from": start.strftime("%Y-%m-%d"),
+        "till": end.strftime("%Y-%m-%d"),
+        "interval": 24,
+        "iss.meta": "off"
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code != 200:
+            return False
+
+        data = response.json()
+        return bool(data.get("candles", {}).get("data"))
+
+    except Exception:
+        return False
